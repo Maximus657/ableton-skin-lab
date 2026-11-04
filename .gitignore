@@ -1,0 +1,9 @@
+# build output and the exe (it goes to Releases)
+/app/target/
+*.exe
+
+# local only: test pictures, prototype scripts and notes, screenshots, sample themes
+/картинки/
+/прототип/
+/скриншоты/
+/темы/
