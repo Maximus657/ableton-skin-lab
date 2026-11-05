@@ -24,6 +24,7 @@
 - **A picture for every panel.** One picture behind the browser, another behind the arrangement, a third behind the devices, or one over the whole window. A picture can fill its panel, show whole, or sit anywhere as a sticker.
 - **Live stays usable.** Pictures show only where Live has an empty panel background, so clips, the grid, knobs and text stay on top and everything stays clickable. A dark rim keeps the text readable even over a light picture.
 - **Colours from the picture.** Add a picture and the interface takes its palette: the greys get its hue, the accents its brightest colours. Or set the hue, the accents, how dark and how colourful by hand.
+- **The app wears your skin.** The editor itself takes the colours of your pictures: panels, buttons, sliders and, on Windows 11, the title bar, over a soft glow made from the preview. Switch skins and it all fades to the new colours.
 - **See it first.** The editor shows your own Live window with the skin on it. Drag pictures with the mouse, resize them by the corners or with the wheel, blur, dim, rotate and mirror them.
 - **Line art and dark art.** *Lines only* turns a drawing on white paper into light chalk lines; *Black background → panel colour* melts a dark picture into Live's panels.
 - **As many skins as you like**, switched in the editor or from the tray.
@@ -35,6 +36,12 @@
 
 ![The Ableton Skin Lab editor](docs/screenshots/editor-en.webp)
 <p align="center"><sub>The editor: the pictures and their settings on the right, a preview of your Live on the left.</sub></p>
+
+| | |
+|:-:|:-:|
+| ![The editor with a pink skin](docs/screenshots/editor-pink-en.webp) | ![The editor with a black-and-white skin](docs/screenshots/editor-bw-en.webp) |
+
+<p align="center"><sub>The editor takes on the colours of each skin.</sub></p>
 
 ## Getting started
 

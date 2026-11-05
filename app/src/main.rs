@@ -11,6 +11,7 @@ mod engine;
 mod icon;
 mod lang;
 mod live;
+mod palette;
 mod preview;
 mod theme;
 mod update;

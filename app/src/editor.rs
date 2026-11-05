@@ -4,14 +4,15 @@
 
 use crate::config::{self, Colors, Config, Fit, Layer, Skin, Snapshot, APP_NAME, ZONES};
 use crate::engine::scene;
+use crate::palette::{self, pal, Fade, Glow, Pal};
 use crate::preview::{self, theme_sig, Preview};
 use crate::lang::{self, t};
 use crate::update::{self, Release};
 use crate::{live, log, theme};
 use eframe::egui::{
     self, pos2, vec2, Align, Color32, ColorImage, CornerRadius, CursorIcon, Event, FontData, FontDefinitions,
-    FontFamily, FontId, Id, Key, Layout, Margin, Modifiers, MouseWheelUnit, Pos2, Rect, RichText, Sense, Slider,
-    Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, UiBuilder,
+    FontFamily, FontId, Id, Key, LayerId, Layout, Margin, Modifiers, MouseWheelUnit, Pos2, Rect, RichText, Sense,
+    Slider, Stroke, StrokeKind, TextStyle, TextureHandle, TextureOptions, UiBuilder,
 };
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -28,14 +29,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_RESTORE,
 };
 
-const ACCENT: Color32 = Color32::from_rgb(160, 120, 255);
-const ACCENT_DIM: Color32 = Color32::from_rgb(84, 58, 160);
-const TOP_BG: Color32 = Color32::from_rgb(20, 20, 24);
-const SIDE_BG: Color32 = Color32::from_rgb(25, 25, 30);
-const STAGE_BG: Color32 = Color32::from_rgb(13, 13, 16);
-const ROW: Color32 = Color32::from_rgb(35, 35, 42);
-const ROW_HOVER: Color32 = Color32::from_rgb(46, 46, 56);
-const WEAK: Color32 = Color32::from_rgb(150, 150, 165);
 const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 
 /// `updated`: started by an update, as the old version's editor closes.
@@ -151,30 +144,12 @@ fn setup_style(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.all_styles_mut(|s| {
         let mut v = egui::Visuals::dark();
-        v.panel_fill = SIDE_BG;
-        v.window_fill = Color32::from_rgb(30, 30, 37);
-        v.extreme_bg_color = Color32::from_rgb(15, 15, 19);
-        v.faint_bg_color = ROW;
-        v.hyperlink_color = ACCENT;
-        v.selection.bg_fill = ACCENT_DIM;
-        v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(235, 225, 255));
         v.slider_trailing_fill = true;
         v.window_corner_radius = CornerRadius::same(12);
         v.menu_corner_radius = CornerRadius::same(8);
         for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
             w.corner_radius = CornerRadius::same(6);
         }
-        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(42, 42, 50));
-        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(205, 205, 215));
-        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(42, 42, 51);
-        v.widgets.inactive.bg_fill = Color32::from_rgb(52, 52, 63);
-        v.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(228, 228, 238));
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(56, 54, 70);
-        v.widgets.hovered.bg_fill = Color32::from_rgb(66, 62, 84);
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
-        v.widgets.active.weak_bg_fill = ACCENT_DIM;
-        v.widgets.active.bg_fill = ACCENT_DIM;
-        v.widgets.open.weak_bg_fill = Color32::from_rgb(56, 54, 70);
         s.visuals = v;
         s.spacing.item_spacing = vec2(8.0, 7.0);
         s.spacing.button_padding = vec2(10.0, 4.0);
@@ -329,6 +304,9 @@ struct Editor {
     autostart: bool,
     shot: Option<Shot>,
     frames: u64,
+    /// the window's own colours on their way to the skin's
+    fade: Fade,
+    glow: Option<Glow>,
     /// a newer version, once a check found one
     release: Option<Release>,
     update_open: bool,
@@ -422,11 +400,39 @@ fn cover_uv(size: [usize; 2], rect: Rect) -> Rect {
 
 fn section(ui: &mut egui::Ui, title: &str, note: Option<&str>) {
     ui.add_space(6.0);
-    ui.label(RichText::new(title).size(17.0).strong().color(Color32::from_rgb(238, 236, 248)));
+    ui.label(RichText::new(title).size(17.0).strong().color(pal().title));
     if let Some(n) = note {
-        ui.label(RichText::new(n).small().color(WEAK));
+        ui.label(RichText::new(n).small().color(pal().weak));
     }
     ui.add_space(4.0);
+}
+
+/// A main button, in the skin's accent. Its light rim on hover shows on a bright accent too.
+fn primary(text: &str, height: f32) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        let p = pal();
+        let r = ui.add(egui::Button::new(RichText::new(text).strong().color(p.on_fill)).fill(p.fill).min_size(vec2(0.0, height)));
+        if r.hovered() {
+            ui.painter().rect_stroke(r.rect, 6.0, Stroke::new(1.5, p.title), StrokeKind::Outside);
+        }
+        r
+    }
+}
+
+/// A strip going through `stops` from left to right.
+fn strip(painter: &egui::Painter, r: Rect, stops: &[Color32]) {
+    let mut m = egui::Mesh::default();
+    for (i, c) in stops.iter().enumerate() {
+        let x = r.left() + r.width() * i as f32 / (stops.len() - 1) as f32;
+        m.colored_vertex(pos2(x, r.top()), *c);
+        m.colored_vertex(pos2(x, r.bottom()), *c);
+        if i > 0 {
+            let n = i as u32 * 2;
+            m.add_triangle(n - 2, n - 1, n);
+            m.add_triangle(n - 1, n, n + 1);
+        }
+    }
+    painter.add(m);
 }
 
 fn icon(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>, tip: &str) -> egui::Response {
@@ -474,6 +480,8 @@ impl Editor {
             cfg.skins.push(Skin::default());
         }
         cfg.active = cfg.active.min(cfg.skins.len() - 1);
+        let colors = Pal::of(cfg.skins[cfg.active].wanted());
+        palette::wear(&cc.egui_ctx, colors, shot.is_none());
         let (jobs, job_rx) = channel();
         let (done_tx, done) = channel();
         let (update_tx, update_rx) = channel();
@@ -514,6 +522,8 @@ impl Editor {
             autostart: false,
             shot: shot.map(|path| Shot { path, asked: false }),
             frames: 0,
+            fade: Fade::new(colors),
+            glow: None,
             release: None,
             update_open: false,
             update: Upd::Idle,
@@ -663,6 +673,11 @@ impl Editor {
                 match &mut self.tex {
                     Some(t) => t.set(ci, TextureOptions::LINEAR),
                     None => self.tex = Some(ctx.load_texture("preview", ci, TextureOptions::LINEAR)),
+                }
+                let cells = palette::glow_of(&img);
+                match &mut self.glow {
+                    Some(g) => g.want = cells,
+                    None => self.glow = Some(Glow::new(ctx, cells)),
                 }
             }
             Err(e) => log!("preview: {e}"),
@@ -1118,14 +1133,42 @@ impl Editor {
 
     // ---- the window ----
 
+    /// The window's colours follow the skin's, and so what the skin is trying out.
+    fn follow_colors(&mut self, ctx: &egui::Context) {
+        if let Some(p) = self.fade.step(Pal::of(self.skin().wanted()), self.fade_dt(ctx)) {
+            palette::wear(ctx, p, self.shot.is_none());
+            ctx.request_repaint();
+        }
+    }
+
+    /// A picture of the window shows where a change ends, not its first frames.
+    fn fade_dt(&self, ctx: &egui::Context) -> f32 {
+        if self.shot.is_some() {
+            10.0
+        } else {
+            ctx.input(|i| i.stable_dt)
+        }
+    }
+
+    fn backdrop(&mut self, ctx: &egui::Context) {
+        let painter = ctx.layer_painter(LayerId::background());
+        painter.rect_filled(ctx.screen_rect(), 0.0, pal().stage);
+        let dt = self.fade_dt(ctx);
+        if let Some(g) = &mut self.glow {
+            g.paint(ctx, &painter, dt);
+        }
+    }
+
     fn top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top").frame(egui::Frame::new().fill(TOP_BG).inner_margin(Margin::symmetric(16, 10))).show(ctx, |ui| {
+        let p = pal();
+        let bar = egui::TopBottomPanel::top("top").frame(egui::Frame::new().fill(p.top.gamma_multiply(palette::TOP_ALPHA)).inner_margin(Margin::symmetric(16, 10))).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("✦ {APP_NAME}")).size(19.0).strong().color(ACCENT));
+                ui.label(RichText::new("✦").size(19.0).strong().color(p.accent2));
+                ui.label(RichText::new(APP_NAME).size(19.0).strong().color(p.accent));
                 if let Some(r) = &self.release {
                     let text = format!("⬆ {} {}", t("Обновление", "Update"), r.version);
                     let tip = t("Вышла новая версия Ableton Skin Lab", "A new version of Ableton Skin Lab is out");
-                    if ui.add(egui::Button::new(RichText::new(text).strong()).fill(ACCENT_DIM)).on_hover_text(tip).clicked() {
+                    if ui.add(primary(&text, 0.0)).on_hover_text(tip).clicked() {
                         self.update_open = true;
                     }
                 }
@@ -1171,7 +1214,7 @@ impl Editor {
                     let (text, color) = if self.live_open {
                         (t("● Live открыт", "● Live is open"), Color32::from_rgb(110, 220, 140))
                     } else {
-                        (t("○ Live не запущен", "○ Live is not running"), WEAK)
+                        (t("○ Live не запущен", "○ Live is not running"), p.weak)
                     };
                     ui.label(RichText::new(text).color(color));
                     if !self.engine_on
@@ -1194,6 +1237,8 @@ impl Editor {
                 });
             });
         });
+        let edge = Rect::from_min_max(pos2(bar.response.rect.left(), bar.response.rect.bottom() - 2.0), bar.response.rect.right_bottom());
+        strip(&ctx.layer_painter(LayerId::background()), edge, &[p.accent, p.accent2, Color32::TRANSPARENT]);
     }
 
     fn side_panel(&mut self, ctx: &egui::Context) {
@@ -1201,10 +1246,10 @@ impl Editor {
             .resizable(true)
             .default_width(400.0)
             .width_range(340.0..=560.0)
-            .frame(egui::Frame::new().fill(SIDE_BG).inner_margin(Margin::symmetric(14, 10)))
+            .frame(egui::Frame::new().fill(pal().side.gamma_multiply(palette::SIDE_ALPHA)).inner_margin(Margin::symmetric(14, 10)))
             .show(ctx, |ui| {
                 egui::TopBottomPanel::bottom("apply")
-                    .frame(egui::Frame::new().fill(SIDE_BG).inner_margin(Margin { left: 0, right: 0, top: 10, bottom: 2 }))
+                    .frame(egui::Frame::new().inner_margin(Margin { left: 0, right: 0, top: 10, bottom: 2 }))
                     .show_inside(ui, |ui| self.apply_bar(ui));
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     self.layers_ui(ui);
@@ -1225,10 +1270,13 @@ impl Editor {
     fn apply_bar(&mut self, ui: &mut egui::Ui) {
         let pending = self.skin().draft.is_some();
         ui.horizontal(|ui| {
-            let text = RichText::new(t("Применить в Live", "Apply to Live")).strong();
-            let apply = egui::Button::new(text).fill(if pending { ACCENT_DIM } else { ROW }).min_size(vec2(0.0, 32.0));
-            if ui.add_enabled(pending, apply).clicked() {
-                self.apply_colors();
+            let text = t("Применить в Live", "Apply to Live");
+            if pending {
+                if ui.add(primary(text, 32.0)).clicked() {
+                    self.apply_colors();
+                }
+            } else {
+                ui.add_enabled(false, egui::Button::new(RichText::new(text).strong()).fill(pal().row).min_size(vec2(0.0, 32.0)));
             }
             if pending
                 && ui
@@ -1247,7 +1295,7 @@ impl Editor {
         } else {
             t("В Live сейчас эти цвета. Картинки появляются в Live сразу.", "Live has these colours. Pictures show up in Live right away.")
         };
-        ui.label(RichText::new(note).small().color(WEAK));
+        ui.label(RichText::new(note).small().color(pal().weak));
     }
 
     fn layers_ui(&mut self, ui: &mut egui::Ui) {
@@ -1267,7 +1315,7 @@ impl Editor {
                     "Пока пусто. Добавь картинку кнопкой ниже, перетащи файл прямо в окно или дважды щёлкни по панели на превью.",
                     "Nothing here yet. Add a picture with the button below, drop a file into the window, or double-click a panel in the preview.",
                 ))
-                    .color(WEAK),
+                    .color(pal().weak),
             );
             ui.add_space(4.0);
         }
@@ -1276,12 +1324,14 @@ impl Editor {
         for i in (0..n).rev() {
             let (path, name, zone, hidden, failed) = &rows[i];
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
-            let fill = if self.sel == Some(i) {
-                ACCENT_DIM
+            let p = pal();
+            let selected = self.sel == Some(i);
+            let fill = if selected {
+                p.select
             } else if resp.hovered() {
-                ROW_HOVER
+                p.row_hover
             } else {
-                ROW
+                p.row
             };
             ui.painter().rect_filled(rect, 8.0, fill);
             if resp.clicked() {
@@ -1319,13 +1369,13 @@ impl Editor {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     let mut title = RichText::new(name.as_str());
                     if *hidden {
-                        title = title.color(WEAK).strikethrough();
+                        title = title.color(if selected { p.text } else { p.weak }).strikethrough();
                     }
                     ui.add(egui::Label::new(title).truncate());
                     let sub = if *failed {
                         RichText::new(t("не открылась", "did not open")).small().color(Color32::from_rgb(255, 120, 120))
                     } else {
-                        RichText::new(*zone).small().color(WEAK)
+                        RichText::new(*zone).small().color(if selected { p.text } else { p.weak })
                     };
                     ui.add(egui::Label::new(sub).truncate());
                 });
@@ -1337,8 +1387,7 @@ impl Editor {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let add = egui::Button::new(RichText::new(t("+ Добавить картинку", "+ Add picture")).strong()).fill(ACCENT_DIM).min_size(vec2(0.0, 30.0));
-            if ui.add(add).clicked() {
+            if ui.add(primary(t("+ Добавить картинку", "+ Add picture"), 30.0)).clicked() {
                 let zone = self.zone.clone();
                 for f in pick_files() {
                     self.add_picture(&f, &zone);
@@ -1495,7 +1544,7 @@ impl Editor {
             ui.label(
                 RichText::new(t("Цвета картинки: щелчок — акцент 1, правый щелчок — акцент 2", "Picture colours: click = accent 1, right-click = accent 2"))
                     .small()
-                    .color(WEAK),
+                    .color(pal().weak),
             );
             ui.horizontal_wrapped(|ui| {
                 for (rgb, share) in c.palette.clone() {
@@ -1582,7 +1631,7 @@ impl Editor {
     }
 
     fn central(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(STAGE_BG).inner_margin(Margin::same(16))).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(pal().stage.gamma_multiply(palette::STAGE_ALPHA)).inner_margin(Margin::same(16))).show(ctx, |ui| {
             let full = ui.available_rect_before_wrap();
             if let Err(e) = &self.pv {
                 ui.label(RichText::new(format!("{}: {e}", t("Превью не работает", "The preview does not work"))).color(Color32::from_rgb(255, 140, 120)));
@@ -1612,8 +1661,11 @@ impl Editor {
         let to_screen = move |r: [f32; 4]| Rect::from_min_size(img.min + vec2(r[0], r[1]) * k, vec2(r[2], r[3]) * k);
         let to_frame = move |p: Pos2| pos2((p.x - img.min.x) / k, (p.y - img.min.y) / k);
         let resp = ui.allocate_rect(img, Sense::click_and_drag());
+        let p = pal();
+        // the preview gives off a little of the accent's light
+        ui.painter().add(egui::Shadow { offset: [0, 0], blur: 44, spread: 0, color: p.accent.gamma_multiply(0.2) }.as_shape(img, CornerRadius::ZERO));
         let painter = ui.painter_at(img.expand(12.0));
-        painter.rect_filled(img.expand(1.0), 0.0, Color32::from_gray(30));
+        painter.rect_filled(img.expand(1.0), 0.0, p.line);
         if let Some(t) = &self.tex {
             painter.image(t.id(), img, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
         }
@@ -1631,7 +1683,7 @@ impl Editor {
             for (id, r) in &f.snap.zones {
                 let hot = hot_zone.as_deref() == Some(id.as_str());
                 let sr = to_screen(r.map(|v| v as f32));
-                let stroke = if hot { Stroke::new(1.5, ACCENT) } else { Stroke::new(1.0, Color32::from_white_alpha(22)) };
+                let stroke = if hot { Stroke::new(1.5, p.accent) } else { Stroke::new(1.0, Color32::from_white_alpha(22)) };
                 painter.rect_stroke(sr, 0.0, stroke, StrokeKind::Inside);
                 if hot && self.drag.is_none() {
                     let note = if files { t(" — бросай сюда", " — drop here") } else { "" };
@@ -1645,14 +1697,14 @@ impl Editor {
             if let Some((pl, zr)) = self.placed(i) {
                 let pr = to_screen(pl);
                 let zs = to_screen(zr);
-                painter.rect_stroke(pr, 0.0, Stroke::new(1.0, ACCENT.gamma_multiply(0.45)), StrokeKind::Middle);
-                painter.with_clip_rect(zs.intersect(img)).rect_stroke(pr, 0.0, Stroke::new(2.0, ACCENT), StrokeKind::Middle);
+                painter.rect_stroke(pr, 0.0, Stroke::new(1.0, p.accent.gamma_multiply(0.45)), StrokeKind::Middle);
+                painter.with_clip_rect(zs.intersect(img)).rect_stroke(pr, 0.0, Stroke::new(2.0, p.accent), StrokeKind::Middle);
                 if self.skin().layers[i].fit != Fit::Cover {
                     for (n, c) in [pr.left_top(), pr.right_top(), pr.left_bottom(), pr.right_bottom()].into_iter().enumerate() {
                         if img.expand(6.0).contains(c) {
                             let h = Rect::from_center_size(c, vec2(10.0, 10.0));
                             painter.rect_filled(h, 2.0, Color32::WHITE);
-                            painter.rect_stroke(h, 2.0, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
+                            painter.rect_stroke(h, 2.0, Stroke::new(1.5, p.accent), StrokeKind::Inside);
                             corners.push((n, c));
                         }
                     }
@@ -1746,8 +1798,8 @@ impl Editor {
             },
             None => String::new(),
         };
-        let dim = Color32::from_gray(120);
-        ui.label(RichText::new(status).color(WEAK));
+        let dim = pal().weak;
+        ui.label(RichText::new(status).color(dim));
         ui.label(
             RichText::new(t(
                 "Щелчок — выбрать картинку · тяни — двигать · уголки — размер · колёсико — крупнее/мельче · \
@@ -1772,7 +1824,7 @@ impl Editor {
         });
         if let Some((msg, at)) = &self.toast {
             if at.elapsed() < Duration::from_secs(6) {
-                ui.label(RichText::new(msg.as_str()).color(Color32::from_rgb(255, 170, 120)));
+                ui.label(RichText::new(msg.as_str()).color(pal().accent2));
             }
         }
     }
@@ -1790,7 +1842,7 @@ impl Editor {
         let modal = egui::Modal::new(Id::new("update")).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.heading(format!("{} {}", t("Новая версия", "New version"), r.version));
-            ui.label(RichText::new(format!("{} {}", t("Сейчас у тебя", "You have"), update::VERSION)).color(WEAK));
+            ui.label(RichText::new(format!("{} {}", t("Сейчас у тебя", "You have"), update::VERSION)).color(pal().weak));
             ui.add_space(6.0);
             let notes = notes_text(&r.notes);
             if !notes.is_empty() {
@@ -1806,8 +1858,7 @@ impl Editor {
                     ui.spinner();
                     ui.label(if self.update == Upd::Downloading { t("Скачиваю…", "Downloading…") } else { t("Перезапускаю…", "Restarting…") });
                 } else {
-                    let go = egui::Button::new(RichText::new(t("Обновить и перезапустить", "Update and restart")).strong()).fill(ACCENT_DIM);
-                    install = ui.add(go).clicked();
+                    install = ui.add(primary(t("Обновить и перезапустить", "Update and restart"), 0.0)).clicked();
                     close = ui.button(t("Позже", "Later")).clicked();
                 }
             });
@@ -1857,7 +1908,7 @@ impl Editor {
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(button).fill(ACCENT_DIM)).clicked() {
+                if ui.add(primary(button, 0.0)).clicked() {
                     ok = true;
                 }
                 if ui.button(t("Отмена", "Cancel")).clicked() {
@@ -1968,6 +2019,9 @@ impl eframe::App for Editor {
         self.take_dropped(ctx);
         self.receive_done();
         self.receive_update(ctx);
+        self.follow_colors(ctx);
+        palette::light_selection(ctx);
+        self.backdrop(ctx);
         self.top_bar(ctx);
         self.side_panel(ctx);
         // the side panel's changes reach this frame's preview
