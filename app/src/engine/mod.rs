@@ -661,6 +661,14 @@ impl Engine {
         let Some((name, shown)) = self.applying.take() else { return };
         let dir = self.live.as_ref().and_then(|a| live::themes_dir(&a.win.exe));
         match r {
+            // Live had this slot selected already and doesn't re-read a selected theme, so it
+            // still shows the slot's older colours: the next try takes the other slot
+            Ok(previous) if previous == name && shown.is_some() => {
+                log!("Live already had '{name}' selected");
+                self.state.slot = Some(name);
+                self.state.hash = 0;
+                self.save_state();
+            }
             Ok(previous) => {
                 if !previous.is_empty() && !previous.starts_with("Skin Lab") {
                     self.state.user_theme = Some(previous);
