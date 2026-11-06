@@ -171,7 +171,6 @@ struct Attached {
     bounds: RECT,
     /// where our overlay window currently is
     placed: RECT,
-    shown: bool,
     /// our theme selected in this Live, if known
     theme: Option<Shown>,
     /// UI Automation has answered at least once: Live's UI is up
@@ -242,22 +241,7 @@ impl Engine {
             let hinst = register_class(ENGINE_CLASS)?;
             register_class(w!("SkinLabOverlay"))?;
             let msg = CreateWindowExW(WINDOW_EX_STYLE(0), ENGINE_CLASS, w!("Skin Lab engine"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None)?;
-            // click-through, never activated, not in the taskbar or Alt+Tab; its pixels come
-            // from DirectComposition with per-pixel alpha
-            let overlay = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
-                w!("SkinLabOverlay"),
-                w!("Skin Lab overlay"),
-                WS_POPUP,
-                0,
-                0,
-                1,
-                1,
-                None,
-                None,
-                Some(hinst),
-                None,
-            )?;
+            let overlay = overlay_window()?;
             SetLayeredWindowAttributes(overlay, COLORREF(0), 255, LWA_ALPHA)?;
             let gpu = Gpu::new(Some(overlay))?;
             let frame_event = CreateEventW(None, false, false, None)?;
@@ -333,7 +317,7 @@ impl Engine {
         }
         self.tray(NIM_DELETE);
         unsafe {
-            let _ = DestroyWindow(self.overlay);
+            let _ = PostMessageW(Some(self.overlay), WM_CLOSE, WPARAM(0), LPARAM(0));
             let _ = DestroyWindow(self.msg);
         }
     }
@@ -445,6 +429,7 @@ impl Engine {
             }
         }
         LIVE_HWND.store(win.hwnd.0 as isize, Relaxed);
+        set_owner(self.overlay, Some(win.hwnd));
         let _ = self.to_uia.send(ToUia::Live(Some(win.clone())));
         self.live = Some(Attached {
             win,
@@ -453,7 +438,6 @@ impl Engine {
             since: Instant::now(),
             bounds: RECT::default(),
             placed: RECT::default(),
-            shown: false,
             theme: None,
             ui_ready: false,
             mismatch_since: None,
@@ -478,6 +462,7 @@ impl Engine {
         unsafe {
             let _ = ShowWindow(self.overlay, SW_HIDE);
         }
+        set_owner(self.overlay, None);
     }
 
     fn set_zones(&mut self, z: Option<Zones>) {
@@ -554,12 +539,13 @@ impl Engine {
         }
         let visible = unsafe { IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() } && !live::cloaked(hwnd) && !SIZING.load(Relaxed);
         let want = visible && size_ok && work;
+        // asked each time: Windows also hides and shows an owned window itself, along with its owner
+        let on_screen = unsafe { IsWindowVisible(self.overlay).as_bool() };
         if !want {
-            if a.shown {
+            if on_screen {
                 unsafe {
                     let _ = ShowWindow(self.overlay, SW_HIDE);
                 }
-                a.shown = false;
             }
             return;
         }
@@ -576,9 +562,8 @@ impl Engine {
                 let _ = SetWindowPos(self.overlay, None, rect.left, rect.top, fw as i32, fh as i32, SWP_NOZORDER | SWP_NOACTIVATE);
                 a.placed = rect;
             }
-            if !a.shown {
+            if !on_screen {
                 let _ = ShowWindow(self.overlay, SW_SHOWNOACTIVATE);
-                a.shown = true;
             }
         }
         place_above(self.overlay, hwnd);
@@ -803,6 +788,48 @@ fn tray_icon(size: u32) -> HICON {
     }
 }
 
+/// The overlay: click-through, never activated, not in the taskbar or Alt+Tab; its pixels come from
+/// DirectComposition with per-pixel alpha. A window owned by Live's shares Live's input queue, so it
+/// gets a thread that does nothing but pump and can never keep Live waiting.
+fn overlay_window() -> windows::core::Result<HWND> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || unsafe {
+        let hinst: Option<HINSTANCE> = GetModuleHandleW(None).ok().map(Into::into);
+        let made = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+            w!("SkinLabOverlay"),
+            w!("Skin Lab overlay"),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            hinst,
+            None,
+        );
+        let ok = made.is_ok();
+        let _ = tx.send(made.map(|h| h.0 as isize));
+        let mut msg = MSG::default();
+        while ok && GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            DispatchMessageW(&msg);
+        }
+    });
+    let made = rx.recv().map_err(|_| windows::core::Error::from(E_FAIL))?;
+    made.map(|h| HWND(h as _))
+}
+
+/// Live keeps raising its main window over everything but what it owns: with every plug-in window
+/// or menu it activates, and many times a second while the mouse moves over a menu. Owned by that
+/// window, the overlay goes up with it in one step; otherwise it falls behind Live until the next
+/// `place_above`, and the pictures blink.
+fn set_owner(overlay: HWND, owner: Option<HWND>) {
+    unsafe {
+        SetWindowLongPtrW(overlay, GWLP_HWNDPARENT, owner.map_or(0, |h| h.0 as isize));
+    }
+}
+
 /// Puts the overlay directly above Live's main window: under every window that is above Live
 /// (other apps, Live's own plug-in windows, menus and dialogs), so it never covers them.
 fn place_above(overlay: HWND, live: HWND) {
@@ -818,5 +845,37 @@ fn place_above(overlay: HWND, live: HWND) {
             _ => HWND_TOP,
         };
         let _ = SetWindowPos(overlay, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Live raises its window all the time; if the overlay has to catch up afterwards, it blinks.
+    #[test]
+    fn the_overlay_goes_up_with_lives_window_in_one_step() {
+        unsafe {
+            register_class(w!("SkinLabOverlay")).unwrap();
+            let overlay = overlay_window().unwrap();
+            // (off screen, but they have to be visible: Windows leaves hidden ones where they are)
+            let window = || {
+                CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, w!("STATIC"), None, WS_POPUP | WS_VISIBLE, -100, -100, 1, 1, None, None, None, None).unwrap()
+            };
+            let (live, other) = (window(), window());
+            let _ = SetWindowPos(overlay, None, -100, -100, 1, 1, SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = ShowWindow(overlay, SW_SHOWNOACTIVATE);
+            set_owner(overlay, Some(live));
+            place_above(overlay, live);
+            let raise = |h: HWND| SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE).unwrap();
+            raise(other);
+            raise(live);
+            // (Windows may keep hidden windows of its own between the two)
+            let above_live = std::iter::successors(GetWindow(live, GW_HWNDPREV).ok(), |h| GetWindow(*h, GW_HWNDPREV).ok());
+            assert!(above_live.into_iter().any(|h| h == overlay));
+            set_owner(overlay, None);
+            let _ = DestroyWindow(live);
+            let _ = DestroyWindow(other);
+        }
     }
 }

@@ -195,3 +195,65 @@ pub fn cli(args: &[String]) -> Result<(), String> {
     pv.set_frame(snap, &px)?;
     pv.render(1.0)?.save(out).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Layer;
+
+    /// What the clip editor's rows are made of, in Live's stock theme.
+    const STOCK: &str = r##"<SurfaceBackground Value="#363636" />
+<DetailViewBackground Value="#3e3e3e" />
+<DetailGridTiles Value="#0a0a0a19" />
+<GridLineBase Value="#06060654" />
+<MidiEditorBlackKeyBackground Value="#07070726" />
+"##;
+
+    fn entry(theme: &str, name: &str) -> ([f32; 3], f32) {
+        let line = theme.lines().find(|l| l.contains(name)).expect(name);
+        let hex = line.split("Value=\"#").nth(1).and_then(|v| v.split('"').next()).expect(name);
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).expect(name) as f32;
+        ([byte(0), byte(2), byte(4)], if hex.len() > 6 { byte(6) / 255.0 } else { 1.0 })
+    }
+
+    /// The picture showed through the rows of the piano roll in patches, every other bar.
+    #[test]
+    fn a_picture_stays_out_of_the_clip_editors_rows() {
+        const BLOCK: u32 = 8;
+        let path = std::env::temp_dir().join(format!("skinlab-test-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(BLOCK, BLOCK, image::Rgba([255, 255, 255, 255])).save(&path).unwrap();
+        let mut pv = Preview::new().unwrap();
+        for (hue, tint, depth) in [(0.0, 0.0, 0.0), (303.0, 0.0264, 0.0), (200.0, 0.06, 0.5), (30.0, 0.03, 1.0)] {
+            let colors = Colors { hue, tint, depth, ..Colors::default() };
+            let t = theme::build(STOCK, &colors);
+            // the rows with everything Live can draw on them, in any combination
+            let mut mixes = vec![entry(&t.text, "DetailViewBackground").0];
+            for name in ["DetailGridTiles", "MidiEditorBlackKeyBackground", "GridLineBase"] {
+                let (c, a) = entry(&t.text, name);
+                for m in mixes.clone() {
+                    mixes.push([0, 1, 2].map(|i| m[i] * (1.0 - a) + c[i] * a));
+                }
+            }
+            // a frame of blocks: the panel colour, then each mix
+            let (w, h) = ((mixes.len() as u32 + 1) * BLOCK, BLOCK);
+            let colour = |x: u32| match (x / BLOCK) as usize {
+                0 => t.key,
+                n => mixes[n - 1].map(|v| v.round() as u8),
+            };
+            let px: Vec<u8> = (0..w * h).flat_map(|i| colour(i % w).into_iter().rev().chain([255])).collect();
+            let zones = BTreeMap::from([("lanes".to_string(), [0, 0, w as i32, h as i32])]);
+            let snap = Snapshot { size: [w, h], key: t.key, theme_ok: true, colors: Some(colors.clone()), zones };
+            let layer = Layer { picture: path.to_string_lossy().into_owned(), zone: "lanes".into(), brightness: 1.0, soft: 0.0, ..Layer::default() };
+            pv.set_skin(&Skin { colors, layers: vec![layer], readable: 0.0, ..Skin::default() });
+            pv.set_frame(snap, &px).unwrap();
+            let out = pv.render(1.0).unwrap();
+            let shown = |x: u32| &out.get_pixel(x, BLOCK / 2).0[..3];
+            assert_eq!(shown(BLOCK / 2), [255, 255, 255], "the panel shows the picture");
+            for b in 1..=mixes.len() as u32 {
+                let x = b * BLOCK + BLOCK / 2;
+                assert_eq!(shown(x), colour(x), "hue {hue} depth {depth}, mix {b}");
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}

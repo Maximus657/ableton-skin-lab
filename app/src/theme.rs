@@ -324,6 +324,20 @@ pub fn build(base: &str, c: &Colors) -> Built {
         }
         entries[sb].rgb = key;
     }
+    // Live draws the clip editor's rows on DetailViewBackground. The stock grey sits just above the
+    // panel colour, so what Live blends on it (bar tiles, row lines) lands right on the panel colour
+    // and the pictures showed through in patches. Past the limit of cover() in shader.hlsl nothing
+    // in the rows can be taken for the panel; the darker rows also make the notes stand out more.
+    let past_cover = (2.0 * (0.1 * key.iter().copied().max().unwrap_or(0) as f64 + 1.5)).ceil() as i32 + 2;
+    for e in &mut entries {
+        match e.name.as_str() {
+            "DetailViewBackground" => e.rgb = key.map(|v| (v as i32 - past_cover).max(0) as u8),
+            // on a darker ground the row lines, black keys and bars need more of these to show
+            "MidiEditorBlackKeyBackground" => e.alpha = "40".to_string(),
+            "DetailGridTiles" => e.alpha = "28".to_string(),
+            _ => {}
+        }
+    }
     for e in &entries {
         let v = format!("{:02x}{:02x}{:02x}{}", e.rgb[0], e.rgb[1], e.rgb[2], e.alpha);
         lines[e.line].replace_range(e.at..e.at + e.len, &v);
