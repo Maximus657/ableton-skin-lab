@@ -92,7 +92,7 @@ fn uia_thread(rx: Receiver<ToUia>, tx: Sender<FromUia>, wake: isize) {
                 let t0 = Instant::now();
                 let r = match &live {
                     Some(l) => uia.apply_theme(l, &name),
-                    None => Err("Live is not running".into()),
+                    None => Err(t("Live не запущен", "Live is not running").into()),
                 };
                 log!("theme '{name}': {:?} in {} ms", r, t0.elapsed().as_millis());
                 send(FromUia::Applied(r));
@@ -202,6 +202,9 @@ struct Engine {
     /// the theme the skin wants (hash, 0 = the user's own) and since when
     want_since: Option<(u64, Instant)>,
     fg_hook: HWINEVENTHOOK,
+    next_gpu_check: Instant,
+    /// the last frame's render error, so that a lasting one is logged once
+    render_error: Option<String>,
 }
 
 pub fn run() {
@@ -260,7 +263,7 @@ impl Engine {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             );
             let icon = tray_icon(GetSystemMetrics(SM_CXSMICON).max(16) as u32);
-            let e = Engine {
+            let mut e = Engine {
                 cfg: Config::default(),
                 state: config::load(&config::state_path()),
                 gpu,
@@ -281,7 +284,11 @@ impl Engine {
                 next_apply: Instant::now(),
                 want_since: None,
                 fg_hook,
+                next_gpu_check: Instant::now(),
+                render_error: None,
             };
+            // a problem with a Live that is no longer there
+            e.set_problem(None);
             e.tray(NIM_ADD);
             log!("engine started");
             Ok(e)
@@ -341,6 +348,7 @@ impl Engine {
                 FromUia::Applied(r) => self.applied(r),
             }
         }
+        self.recover_gpu();
         self.track_live();
         self.update_overlay();
         self.manage_theme();
@@ -384,6 +392,52 @@ impl Engine {
         }
     }
 
+    /// What the editor shows when Live does not get its theme.
+    fn set_problem(&mut self, problem: Option<String>) {
+        if self.state.problem != problem {
+            self.state.problem = problem;
+            self.save_state();
+        }
+    }
+
+    /// A lost graphics device never comes back: everything that lived on it is made anew.
+    fn recover_gpu(&mut self) {
+        let now = Instant::now();
+        if now < self.next_gpu_check {
+            return;
+        }
+        self.next_gpu_check = now + Duration::from_secs(1);
+        if !self.gpu.lost() {
+            return;
+        }
+        log!("graphics device lost");
+        if let Some(a) = self.live.as_mut() {
+            a.cap = None;
+        }
+        self.scene.pics.clear();
+        // the window can only belong to one device at a time
+        self.gpu.release_output();
+        match Gpu::new(Some(self.overlay)) {
+            Ok(g) => self.gpu = g,
+            Err(e) => {
+                log!("no new graphics device yet: {e}");
+                self.next_gpu_check = now + Duration::from_secs(30);
+                return;
+            }
+        }
+        self.prepare();
+        if let Some(a) = self.live.as_mut() {
+            a.cap = match Capture::new(&self.gpu.winrt, a.win.hwnd, self.frame_event) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    log!("capture failed: {e}");
+                    None
+                }
+            };
+        }
+        log!("graphics device made anew");
+    }
+
     fn track_live(&mut self) {
         if let Some(a) = &self.live {
             if !unsafe { IsWindow(Some(a.win.hwnd)) }.as_bool() {
@@ -406,9 +460,9 @@ impl Engine {
                 self.state.themes_dir = Some(d);
                 self.save_state();
             }
-            if self.scene.built.is_none() {
-                self.prepare();
-            }
+            // this Live's stock theme may differ from the one the skin's theme was built from
+            self.scene.built = None;
+            self.prepare();
         }
         let cap = match Capture::new(&self.gpu.winrt, win.hwnd, self.frame_event) {
             Ok(c) => Some(c),
@@ -458,6 +512,7 @@ impl Engine {
         LIVE_HWND.store(0, Relaxed);
         let _ = self.to_uia.send(ToUia::Live(None));
         self.zones = None;
+        self.set_problem(None);
         self.gpu.forget_frame();
         unsafe {
             let _ = ShowWindow(self.overlay, SW_HIDE);
@@ -552,8 +607,12 @@ impl Engine {
         let rect = RECT { left: a.bounds.left, top: a.bounds.top, right: a.bounds.left + fw as i32, bottom: a.bounds.top + fh as i32 };
         if self.dirty {
             self.dirty = false;
-            if let Err(e) = self.render() {
-                log!("render failed: {e}");
+            let failed = self.render().err().map(|e| e.to_string());
+            if failed != self.render_error {
+                if let Some(e) = &failed {
+                    log!("render failed: {e}");
+                }
+                self.render_error = failed;
             }
         }
         let Some(a) = self.live.as_mut() else { return };
@@ -625,6 +684,7 @@ impl Engine {
                 let slot = if self.state.slot.as_deref() == Some(SLOT_A) { SLOT_B } else { SLOT_A };
                 if let Err(e) = std::fs::write(dir.join(format!("{slot}.ask")), &t.text) {
                     log!("writing theme: {e}");
+                    self.set_problem(Some(format!("{}: {e}", dir.display())));
                     self.next_apply = Instant::now() + Duration::from_secs(30);
                     return;
                 }
@@ -684,11 +744,13 @@ impl Engine {
                 }
                 self.dirty = true;
                 self.failures = 0;
+                self.state.problem = None;
                 self.save_state();
             }
             Err(e) => {
                 self.failures += 1;
                 log!("selecting theme '{name}' failed ({}): {e}", self.failures);
+                self.set_problem(Some(e));
                 let wait = if self.failures < 3 { 10 } else { 300 };
                 self.next_apply = Instant::now() + Duration::from_secs(wait);
             }

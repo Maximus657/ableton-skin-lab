@@ -221,6 +221,8 @@ pub struct State {
     pub hash: u64,
     /// Live's Themes folder, found from the running Live
     pub themes_dir: Option<String>,
+    /// why Live does not show the theme it should, for the editor to tell
+    pub problem: Option<String>,
 }
 
 /// A frame of the running Live (raw, without pictures) with its panels, for the editor's preview.
@@ -263,11 +265,23 @@ pub fn pictures_dir() -> PathBuf {
     d
 }
 
+/// The file's contents (the defaults when there is no file), or `Err` when the file is there but
+/// cannot be understood. Such a file is kept as `<name>.bad.json`: the next save would otherwise
+/// be the end of everything in it.
+pub fn load_checked<T: DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
+    let Ok(bytes) = std::fs::read(path) else { return Ok(T::default()) };
+    serde_json::from_slice(&bytes).map_err(|e| {
+        let kept = path.with_extension("bad.json");
+        if !bytes.iter().all(u8::is_ascii_whitespace) {
+            let _ = std::fs::write(&kept, &bytes);
+        }
+        log(&format!("{} is unreadable ({e}), kept as {}", path.display(), kept.display()));
+        e.to_string()
+    })
+}
+
 pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    load_checked(path).unwrap_or_default()
 }
 
 /// Write-then-rename, so a reader never sees half a file.
@@ -473,4 +487,22 @@ pub fn log(msg: &str) {
 #[macro_export]
 macro_rules! log {
     ($($t:tt)*) => { $crate::config::log(&format!($($t)*)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config.json that would not parse was read as "no skins" and saved over: the skins were gone.
+    #[test]
+    fn unreadable_settings_are_kept_aside() {
+        let path = std::env::temp_dir().join(format!("skinlab-test-{}.json", std::process::id()));
+        let written = br#"{"skins":[{"name":"mine","layers":[{"fit":"Tile"}]}]}"#;
+        std::fs::write(&path, written).unwrap();
+        assert!(load_checked::<Config>(&path).is_err());
+        let kept = path.with_extension("bad.json");
+        assert_eq!(std::fs::read(&kept).unwrap(), written);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(kept);
+    }
 }

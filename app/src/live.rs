@@ -1,6 +1,7 @@
 //! Ableton Live from the outside: finding its main window, the rectangles of its panels and
 //! picking a theme in its Settings (both through UI Automation), and the theme it remembers.
 
+use crate::lang::t;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use windows::core::{Interface, BOOL, BSTR, PWSTR};
@@ -345,8 +346,9 @@ impl Uia {
             wait_for(Duration::from_millis(1500), || settings_window(live.pid).is_none().then_some(()));
         }
         unsafe { PostMessageW(Some(live.hwnd), WM_COMMAND, WPARAM(settings_command(live.hwnd) as usize), LPARAM(0)) }
-            .map_err(|e| format!("команда настроек: {e}"))?;
-        let s = wait_for(Duration::from_secs(4), || settings_window(live.pid)).ok_or("окно настроек Live не открылось")?;
+            .map_err(|e| format!("{}: {e}", t("команда настроек", "the Settings command")))?;
+        let s = wait_for(Duration::from_secs(4), || settings_window(live.pid))
+            .ok_or(t("окно настроек Live не открылось", "Live's Settings window did not open"))?;
         let result = self.pick_theme(live, s, name);
         std::thread::sleep(Duration::from_millis(150));
         if was_open.is_none() {
@@ -360,11 +362,13 @@ impl Uia {
     fn pick_theme(&self, live: &LiveWin, settings: HWND, name: &str) -> Result<String, String> {
         unsafe {
             let el = self.a.ElementFromHandle(settings).map_err(|e| e.to_string())?;
-            let tab = wait_for(Duration::from_secs(2), || self.by_id(&el, "ThemeColorsTabButton")).ok_or("в настройках нет вкладки Theme & Colors")?;
+            let tab = wait_for(Duration::from_secs(2), || self.by_id(&el, "ThemeColorsTabButton"))
+                .ok_or(t("в настройках Live нет вкладки Theme & Colors", "Live's Settings have no Theme & Colors tab"))?;
             tab.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                 .and_then(|p| p.Invoke())
-                .map_err(|e| format!("вкладка Theme & Colors: {e}"))?;
-            let chooser = wait_for(Duration::from_secs(2), || self.by_id(&el, "ThemeColors.ThemeChooser")).ok_or("в настройках нет списка тем")?;
+                .map_err(|e| format!("{}: {e}", t("вкладка Theme & Colors", "the Theme & Colors tab")))?;
+            let chooser = wait_for(Duration::from_secs(2), || self.by_id(&el, "ThemeColors.ThemeChooser"))
+                .ok_or(t("в настройках Live нет списка тем", "Live's Settings have no list of themes"))?;
             let previous = chooser
                 .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                 .and_then(|p| p.CurrentValue())
@@ -378,8 +382,8 @@ impl Uia {
             };
             let a = self.a.CreatePropertyCondition(UIA_NamePropertyId, &var_str(name)).map_err(|e| e.to_string())?;
             let b = self.a.CreatePropertyCondition(UIA_NamePropertyId, &var_str(&format!("{name}, checked"))).map_err(|e| e.to_string())?;
-            let t = self.a.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_i32(UIA_MenuItemControlTypeId.0)).map_err(|e| e.to_string())?;
-            let cond = self.a.CreateAndCondition(&t, &self.a.CreateOrCondition(&a, &b).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            let item = self.a.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_i32(UIA_MenuItemControlTypeId.0)).map_err(|e| e.to_string())?;
+            let cond = self.a.CreateAndCondition(&item,&self.a.CreateOrCondition(&a, &b).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             expand();
             let t0 = Instant::now();
             let mut next = 1000;
@@ -396,12 +400,16 @@ impl Uia {
                             .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                             .and_then(|p| p.Invoke())
                             .map(|_| previous)
-                            .map_err(|e| format!("выбор темы: {e}"));
+                            .map_err(|e| format!("{}: {e}", t("выбор темы", "picking the theme")));
                     }
                 }
                 let ms = t0.elapsed().as_millis();
                 if ms > 4000 {
-                    return Err(format!("темы «{name}» нет в списке Live"));
+                    return Err(if crate::lang::english() {
+                        format!("Live's list has no theme “{name}”")
+                    } else {
+                        format!("темы «{name}» нет в списке Live")
+                    });
                 }
                 if ms > next {
                     // right after a theme switch Live rebuilds the page and may swallow Expand()

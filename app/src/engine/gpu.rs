@@ -246,6 +246,17 @@ impl Gpu {
         }
     }
 
+    /// The device is gone for good (a driver update, sleep, another graphics card taking over):
+    /// nothing made on it works any more.
+    pub fn lost(&self) -> bool {
+        unsafe { self.device.GetDeviceRemovedReason().is_err() }
+    }
+
+    /// Lets go of the window, so that a new `Gpu` can take it.
+    pub fn release_output(&mut self) {
+        self.out = None;
+    }
+
     fn ensure_ui(&mut self, w: u32, h: u32, data: Option<&[u8]>) -> Result<()> {
         if self.ui.is_some() && self.ui_size == (w, h) && data.is_none() {
             return Ok(());

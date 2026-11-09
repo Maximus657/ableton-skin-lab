@@ -369,17 +369,39 @@ pub fn theme_dirs() -> Vec<PathBuf> {
     out
 }
 
-/// Live's stock dark theme (cached in our folder once found).
+/// Live's stock dark theme: that of the Live in use, or our copy of it while no Live is found.
 pub fn base_theme() -> Option<String> {
-    let cached = crate::config::dir().join("base.ask");
-    if let Ok(s) = std::fs::read_to_string(&cached) {
-        return Some(s);
-    }
-    for d in theme_dirs() {
-        if let Ok(s) = std::fs::read_to_string(d.join(BASE_NAME)) {
-            let _ = std::fs::write(&cached, &s);
-            return Some(s);
+    base_from(&theme_dirs(), &crate::config::dir().join("base.ask"))
+}
+
+fn base_from(dirs: &[PathBuf], copy: &Path) -> Option<String> {
+    let kept = std::fs::read_to_string(copy).ok();
+    match dirs.iter().find_map(|d| std::fs::read_to_string(d.join(BASE_NAME)).ok()) {
+        Some(s) => {
+            // a newer Live may have more colours in its themes than our copy
+            if kept.as_deref() != Some(s.as_str()) {
+                let _ = std::fs::write(copy, &s);
+            }
+            Some(s)
         }
+        None => kept,
     }
-    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Our copy of the stock theme was read first and for ever, also after Live was updated.
+    #[test]
+    fn the_stock_theme_follows_live() {
+        let dir = std::env::temp_dir().join(format!("skinlab-test-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("base.ask");
+        std::fs::write(&copy, "old").unwrap();
+        std::fs::write(dir.join(BASE_NAME), "new").unwrap();
+        assert_eq!(base_from(&[dir.clone()], &copy).as_deref(), Some("new"));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

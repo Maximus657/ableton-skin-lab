@@ -302,6 +302,8 @@ struct Editor {
     live_open: bool,
     engine_on: bool,
     autostart: bool,
+    /// why Live does not show the theme it should, from the engine
+    problem: Option<String>,
     shot: Option<Shot>,
     frames: u64,
     /// the window's own colours on their way to the skin's
@@ -474,7 +476,9 @@ fn pill(painter: &egui::Painter, at: Pos2, text: &str) {
 impl Editor {
     fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>, updated: bool) -> Editor {
         setup_style(&cc.egui_ctx);
-        let mut cfg: Config = config::load(&config::config_path());
+        let loaded = config::load_checked::<Config>(&config::config_path());
+        let unreadable = loaded.is_err();
+        let mut cfg = loaded.unwrap_or_default();
         let saved = config::fnv(&serde_json::to_vec(&cfg).unwrap_or_default());
         if cfg.skins.is_empty() {
             cfg.skins.push(Skin::default());
@@ -520,6 +524,7 @@ impl Editor {
             live_open: false,
             engine_on: false,
             autostart: false,
+            problem: None,
             shot: shot.map(|path| Shot { path, asked: false }),
             frames: 0,
             fade: Fade::new(colors),
@@ -543,6 +548,12 @@ impl Editor {
             }
             if !in_build_dir() {
                 e.check_update(false);
+            }
+            if unreadable {
+                e.toast(t(
+                    "Настройки не прочитались, начинаю с чистых. Старый файл лежит рядом: config.bad.json",
+                    "The settings could not be read, so this is a fresh start. The old file is kept next to them: config.bad.json",
+                ));
             }
         }
         e
@@ -996,6 +1007,18 @@ impl Editor {
             self.engine_on = config::engine_running();
             self.live_open = live::find().is_some();
             self.autostart = config::autostart();
+            self.problem = config::load::<config::State>(&config::state_path()).problem;
+            if self.pv.as_ref().is_ok_and(|p| p.lost()) {
+                // a lost graphics device never comes back: a new preview on a new one
+                log!("preview: graphics device lost");
+                self.pv = Preview::new();
+                self.skin_hash = 0;
+                self.rendered = 0;
+                if let Some(f) = &mut self.frame {
+                    f.uploaded = None;
+                    f.asked = None;
+                }
+            }
         }
         if self.shot.is_none() && ((focused && now >= self.next_snapshot) || self.snapshot_due.is_some_and(|t| now >= t)) {
             self.ask_snapshot();
@@ -1295,7 +1318,19 @@ impl Editor {
         } else {
             t("В Live сейчас эти цвета. Картинки появляются в Live сразу.", "Live has these colours. Pictures show up in Live right away.")
         };
-        ui.label(RichText::new(note).small().color(pal().weak));
+        match self.problem.as_ref().filter(|_| !pending && self.engine_on && self.live_open) {
+            Some(e) => {
+                let text = format!(
+                    "{}: {e}. {}",
+                    t("Не получилось сменить тему в Live", "Could not switch Live's theme"),
+                    t("Скоро попробую ещё раз.", "Another try is coming soon.")
+                );
+                ui.label(RichText::new(text).small().color(Color32::from_rgb(255, 140, 120)));
+            }
+            None => {
+                ui.label(RichText::new(note).small().color(pal().weak));
+            }
+        }
     }
 
     fn layers_ui(&mut self, ui: &mut egui::Ui) {

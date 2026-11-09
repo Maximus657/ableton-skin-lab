@@ -45,6 +45,11 @@ impl Preview {
         self.scene.pics.get(path).map(|p| (p.w as f32, p.h as f32))
     }
 
+    /// The graphics device is gone: a new `Preview` is needed.
+    pub fn lost(&self) -> bool {
+        self.gpu.lost()
+    }
+
     pub fn failed(&self, path: &str) -> bool {
         self.scene.failed.contains(path)
     }
