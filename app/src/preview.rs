@@ -261,4 +261,22 @@ mod tests {
         }
         let _ = std::fs::remove_file(path);
     }
+
+    /// The grid lines faded out on the darker rows of the piano roll.
+    #[test]
+    fn the_clip_editors_grid_shows_as_in_lives_own_theme() {
+        // how far a bar line darkens the rows
+        let line = |theme: &str| {
+            let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            let ((row, _), (grid, a)) = (entry(theme, "DetailViewBackground"), entry(theme, "GridLineBase"));
+            a * (luma(row) - luma(grid))
+        };
+        let stock = line(STOCK);
+        // skins as light as Live's own theme (a darker skin darkens Live's rows and lines too)
+        for (hue, tint) in [(0.0, 0.0), (303.0, 0.0264), (200.0, 0.06), (30.0, 0.03)] {
+            let t = theme::build(STOCK, &Colors { hue, tint, depth: 0.0, ..Colors::default() });
+            let ours = line(&t.text);
+            assert!(ours >= 0.9 * stock, "hue {hue}: a bar line darkens the rows by {ours:.1}, Live's own by {stock:.1}");
+        }
+    }
 }

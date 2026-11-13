@@ -329,12 +329,28 @@ pub fn build(base: &str, c: &Colors) -> Built {
     // and the pictures showed through in patches. Past the limit of cover() in shader.hlsl nothing
     // in the rows can be taken for the panel; the darker rows also make the notes stand out more.
     let past_cover = (2.0 * (0.1 * key.iter().copied().max().unwrap_or(0) as f64 + 1.5)).ceil() as i32 + 2;
+    let rows = key.map(|v| (v as i32 - past_cover).max(0) as u8);
+    // Live's grid lines darken what lies under them by GridLineBase (bars, beats and finer lines at
+    // 1, 2/3 and 1/3 of its alpha). On the darker rows that was too little to see, so the alpha
+    // grows by as much as the rows lost against Live's own. The arrangement's grid shares the
+    // colour, so it comes out that much stronger too.
+    let luma = |c: [u8; 3]| 0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64;
+    let rgb_of = |name: &str| entries.iter().find(|e| e.name == name).map(|e| e.rgb);
+    let line_gain = match (rgb_of("DetailViewBackground"), rgb_of("GridLineBase")) {
+        (Some(was), Some(line)) => ((luma(was) - luma(line)) / (luma(rows) - luma(line)).max(1.0)).max(1.0),
+        _ => 1.0,
+    };
     for e in &mut entries {
         match e.name.as_str() {
-            "DetailViewBackground" => e.rgb = key.map(|v| (v as i32 - past_cover).max(0) as u8),
+            "DetailViewBackground" => e.rgb = rows,
             // on a darker ground the row lines, black keys and bars need more of these to show
             "MidiEditorBlackKeyBackground" => e.alpha = "40".to_string(),
             "DetailGridTiles" => e.alpha = "28".to_string(),
+            "GridLineBase" => {
+                if let Ok(a) = u8::from_str_radix(&e.alpha, 16) {
+                    e.alpha = format!("{:02x}", (a as f64 * line_gain).round().min(255.0) as u8);
+                }
+            }
             _ => {}
         }
     }
